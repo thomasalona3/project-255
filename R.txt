@@ -1,0 +1,253 @@
+# Install necessary packages (uncomment if not already installed)
+# install.packages("prophet")
+# install.packages("forecast")
+# install.packages("ggplot2")
+# install.packages("tseries")
+# install.packages("dplyr")
+# install.packages("gridExtra")
+# install.packages("ggfortify")
+# install.packages("lubridate")
+
+# Load necessary libraries
+library(prophet)
+library(forecast)
+library(ggplot2)
+library(tseries)
+library(dplyr)
+library(gridExtra)
+library(ggfortify)
+library(lubridate)
+
+# Define the input file path
+input_file_path <- "D:/data.csv"
+
+# Read the data
+data <- read.csv(input_file_path)
+
+# Convert 'ds' to Date and 'y' to numeric
+data$ds <- ymd(paste0(data$ds, "-01-01"), tz = "UTC")
+data$y <- as.numeric(data$y)
+
+# Create a time series object
+ts_data <- ts(data$y, start = c(year(min(data$ds))), frequency = 1)
+
+# Define the output directory path
+output_dir <- file.path(dirname(input_file_path), "output")
+
+# Create 'output' directory if it doesn't exist
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# Function to calculate additional performance metrics
+calculate_metrics <- function(actual, fitted) {
+  residuals <- actual - fitted
+  mae <- mean(abs(residuals))
+  mape <- mean(abs(residuals / actual)) * 100
+  rmse <- sqrt(mean(residuals^2))
+  return(list(MAE = mae, MAPE = mape, RMSE = rmse, Residuals = residuals))
+}
+
+# 1. Prophet Model
+data_prophet <- data
+m_prophet <- prophet(data_prophet)
+
+# Forecast for the next 12 years
+future_prophet <- make_future_dataframe(m_prophet, periods = 12, freq = 'year')
+forecast_prophet <- predict(m_prophet, future_prophet)
+
+# Get fitted values
+fitted_prophet <- forecast_prophet %>%
+  filter(ds <= max(data_prophet$ds)) %>%
+  select(ds, yhat, yhat_lower, yhat_upper, trend)
+
+# Calculate performance metrics
+metrics_prophet <- calculate_metrics(data$y, fitted_prophet$yhat)
+
+# Save residuals
+residuals_prophet <- data.frame(ds = data$ds, Residuals = metrics_prophet$Residuals)
+write.csv(residuals_prophet, file.path(output_dir, "prophet_residuals.csv"), row.names = FALSE)
+
+# Save model parameters
+params_prophet <- m_prophet$params
+write.csv(params_prophet, file.path(output_dir, "prophet_parameters.csv"), row.names = TRUE)
+
+# Save forecast with confidence intervals
+forecast_prophet_output <- forecast_prophet %>%
+  select(ds, yhat, yhat_lower, yhat_upper, trend)
+write.csv(forecast_prophet_output, file.path(output_dir, "prophet_forecast.csv"), row.names = FALSE)
+
+# Save model components plots
+prophet_components <- prophet_plot_components(m_prophet, forecast_prophet)
+
+# Save each component plot individually
+ggsave(filename = file.path(output_dir, "prophet_trend.png"), plot = prophet_components$trend)
+ggsave(filename = file.path(output_dir, "prophet_yearly.png"), plot = prophet_components$yearly)
+
+# 2. ETS Model
+model_ets <- ets(ts_data)
+forecast_ets <- forecast(model_ets, h = 12)
+fitted_ets_values <- fitted(model_ets)
+
+# Calculate performance metrics
+metrics_ets <- calculate_metrics(data$y, fitted_ets_values)
+
+# Save residuals
+residuals_ets <- data.frame(ds = data$ds, Residuals = residuals(model_ets))
+write.csv(residuals_ets, file.path(output_dir, "ets_residuals.csv"), row.names = FALSE)
+
+# Save model summary
+summary_ets <- summary(model_ets)
+capture.output(summary_ets, file = file.path(output_dir, "ets_summary.txt"))
+
+# Save model parameters
+params_ets <- model_ets$par
+write.csv(params_ets, file.path(output_dir, "ets_parameters.csv"), row.names = TRUE)
+
+# Save forecast with confidence intervals
+forecast_ets_output <- data.frame(
+  ds = as.numeric(time(forecast_ets$mean)),
+  Forecast = as.numeric(forecast_ets$mean),
+  Lower80 = as.numeric(forecast_ets$lower[,1]),
+  Upper80 = as.numeric(forecast_ets$upper[,1]),
+  Lower95 = as.numeric(forecast_ets$lower[,2]),
+  Upper95 = as.numeric(forecast_ets$upper[,2])
+)
+write.csv(forecast_ets_output, file.path(output_dir, "ets_forecast.csv"), row.names = FALSE)
+
+# 3. Linear Regression
+data$ds_numeric <- as.numeric(data$ds)
+model_lm <- lm(y ~ ds_numeric, data = data)
+fitted_lm_values <- fitted(model_lm)
+future_years <- data.frame(ds_numeric = seq(max(data$ds_numeric) + 365, by = 365, length.out = 12))
+forecast_lm <- predict(model_lm, newdata = future_years, interval = "predict")
+
+# Calculate performance metrics
+metrics_lm <- calculate_metrics(data$y, fitted_lm_values)
+
+# Save residuals
+residuals_lm <- data.frame(ds = data$ds, Residuals = residuals(model_lm))
+write.csv(residuals_lm, file.path(output_dir, "lm_residuals.csv"), row.names = FALSE)
+
+# Save model summary
+summary_lm <- summary(model_lm)
+capture.output(summary_lm, file = file.path(output_dir, "lm_summary.txt"))
+
+# Save model parameters
+params_lm <- data.frame(Coefficients = coef(model_lm))
+write.csv(params_lm, file.path(output_dir, "lm_parameters.csv"), row.names = TRUE)
+
+# Save forecast with confidence intervals
+forecast_lm_output <- data.frame(
+  ds = as.Date(future_years$ds_numeric, origin = "1970-01-01"),
+  Forecast = forecast_lm[, "fit"],
+  Lower95 = forecast_lm[, "lwr"],
+  Upper95 = forecast_lm[, "upr"]
+)
+write.csv(forecast_lm_output, file.path(output_dir, "lm_forecast.csv"), row.names = FALSE)
+
+# 4. ARIMA(Auto)
+model_auto_arima <- auto.arima(ts_data)
+forecast_auto_arima <- forecast(model_auto_arima, h = 12)
+fitted_auto_arima_values <- fitted(model_auto_arima)
+
+# Calculate performance metrics
+metrics_auto_arima <- calculate_metrics(data$y, fitted_auto_arima_values)
+
+# Save residuals
+residuals_auto_arima <- data.frame(ds = data$ds, Residuals = residuals(model_auto_arima))
+write.csv(residuals_auto_arima, file.path(output_dir, "auto_arima_residuals.csv"), row.names = FALSE)
+
+# Save model summary
+summary_auto_arima <- summary(model_auto_arima)
+capture.output(summary_auto_arima, file = file.path(output_dir, "auto_arima_summary.txt"))
+
+# Save model parameters
+params_auto_arima <- model_auto_arima$coef
+write.csv(params_auto_arima, file.path(output_dir, "auto_arima_parameters.csv"), row.names = TRUE)
+
+# Save forecast with confidence intervals
+forecast_auto_arima_output <- data.frame(
+  ds = as.numeric(time(forecast_auto_arima$mean)),
+  Forecast = as.numeric(forecast_auto_arima$mean),
+  Lower80 = as.numeric(forecast_auto_arima$lower[,1]),
+  Upper80 = as.numeric(forecast_auto_arima$upper[,1]),
+  Lower95 = as.numeric(forecast_auto_arima$lower[,2]),
+  Upper95 = as.numeric(forecast_auto_arima$upper[,2])
+)
+write.csv(forecast_auto_arima_output, file.path(output_dir, "auto_arima_forecast.csv"), row.names = FALSE)
+
+# Combine actual data and fitted values
+combined_data <- data.frame(
+  ds = data$ds,
+  Actual = data$y,
+  Prophet_Fitted = fitted_prophet$yhat,
+  ETS_Fitted = fitted_ets_values,
+  LM_Fitted = fitted_lm_values,
+  ARIMA_Auto_Fitted = fitted_auto_arima_values
+)
+write.csv(combined_data, file.path(output_dir, "model_fitted_values.csv"), row.names = FALSE)
+
+# Combine forecasted values
+forecast_data <- data.frame(
+  ds = future_prophet$ds[(nrow(data_prophet) + 1):nrow(future_prophet)],
+  Prophet_Forecast = forecast_prophet$yhat[(nrow(data_prophet) + 1):nrow(forecast_prophet)],
+  Prophet_Lower95 = forecast_prophet$yhat_lower[(nrow(data_prophet) + 1):nrow(forecast_prophet)],
+  Prophet_Upper95 = forecast_prophet$yhat_upper[(nrow(data_prophet) + 1):nrow(forecast_prophet)],
+  ETS_Forecast = as.numeric(forecast_ets$mean),
+  ETS_Lower95 = forecast_ets$lower[,2],
+  ETS_Upper95 = forecast_ets$upper[,2],
+  LM_Forecast = forecast_lm[, "fit"],
+  LM_Lower95 = forecast_lm[, "lwr"],
+  LM_Upper95 = forecast_lm[, "upr"],
+  ARIMA_Auto_Forecast = as.numeric(forecast_auto_arima$mean),
+  ARIMA_Auto_Lower95 = forecast_auto_arima$lower[,2],
+  ARIMA_Auto_Upper95 = forecast_auto_arima$upper[,2]
+)
+write.csv(forecast_data, file.path(output_dir, "model_forecast_values.csv"), row.names = FALSE)
+
+# Calculate R-squared for regression models
+r_squared_lm <- summary_lm$r.squared
+
+# Create performance data frame
+performance <- data.frame(
+  Model = c("Prophet", "ETS", "Linear Regression", "ARIMA(Auto)"),
+  MAE = c(metrics_prophet$MAE, metrics_ets$MAE, metrics_lm$MAE, metrics_auto_arima$MAE),
+  MAPE = c(metrics_prophet$MAPE, metrics_ets$MAPE, metrics_lm$MAPE, metrics_auto_arima$MAPE),
+  RMSE = c(metrics_prophet$RMSE, metrics_ets$RMSE, metrics_lm$RMSE, metrics_auto_arima$RMSE),
+  R_Squared = c(NA, NA, r_squared_lm, NA),
+  AIC = c(
+    NA,  # Prophet doesn't provide AIC
+    AIC(model_ets),
+    AIC(model_lm),
+    AIC(model_auto_arima)
+  ),
+  BIC = c(
+    NA,  # Prophet doesn't provide BIC
+    BIC(model_ets),
+    BIC(model_lm),
+    BIC(model_auto_arima)
+  )
+)
+write.csv(performance, file.path(output_dir, "model_performance.csv"), row.names = FALSE)
+
+# Generate and save diagnostic plots
+# Prophet Diagnostic Plot
+prophet_plot <- plot(m_prophet, forecast_prophet)
+ggsave(filename = file.path(output_dir, "prophet_forecast_plot.png"), plot = prophet_plot)
+
+# ETS Diagnostic Plots
+png(filename = file.path(output_dir, "ets_diagnostics.png"))
+checkresiduals(model_ets)
+dev.off()
+
+# Linear Regression Diagnostic Plots
+png(filename = file.path(output_dir, "lm_diagnostics.png"))
+par(mfrow = c(2, 2))
+plot(model_lm)
+dev.off()
+
+# Auto ARIMA Diagnostic Plots
+png(filename = file.path(output_dir, "auto_arima_diagnostics.png"))
+checkresiduals(model_auto_arima)
+dev.off()
